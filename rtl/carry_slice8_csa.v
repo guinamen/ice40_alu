@@ -33,12 +33,12 @@ module carry_slice4_csa (
     input         clk,
     input         v_in,
 
-    input  [3:0]  a_in,
-    input  [3:0]  b_in,
-    input  [3:0]  cin_in,   // Carry-in vector (not propagated)
+    input  [7:0]  a_in,
+    input  [7:0]  b_in,
+    input  [7:0]  cin_in,   // Carry-in vector (not propagated)
 
-    output [3:0]  sum,      // Partial sum
-    output [3:0]  carry,    // Partial carry (to be shifted externally)
+    output [7:0]  sum,      // Partial sum
+    output [7:0]  carry,    // Partial carry (to be shifted externally)
     output        v_out
 );
 
@@ -46,9 +46,9 @@ module carry_slice4_csa (
     // Input register stage
     // ------------------------------------------------------------------------
 
-    reg [3:0] a_r;
-    reg [3:0] b_r;
-    reg [3:0] cin_r;
+    reg [7:0] a_r;
+    reg [7:0] b_r;
+    reg [7:0] cin_r;
     reg       v_pipe;
 
     always @(posedge clk) begin
@@ -66,8 +66,8 @@ module carry_slice4_csa (
     // CSA combinational logic (no carry propagation)
     // ------------------------------------------------------------------------
 
-    wire [3:0] sum_c;
-    wire [3:0] carry_c;
+    wire [7:0] sum_c;
+    wire [7:0] carry_c;
 
     assign sum_c   = a_r ^ b_r ^ cin_r;
 
@@ -80,8 +80,8 @@ module carry_slice4_csa (
     // Output register stage
     // ------------------------------------------------------------------------
 
-    reg [3:0] sum_r;
-    reg [3:0] carry_r;
+    reg [7:0] sum_r;
+    reg [7:0] carry_r;
     reg       v_out_r;
 
     always @(posedge clk) begin
