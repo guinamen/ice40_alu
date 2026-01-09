@@ -1,5 +1,5 @@
 module unit_sum #(
-    parameter WIDTH = 32
+    parameter WIDTH = 8
 ) (
     input  [WIDTH-1:0] a,
     input  [WIDTH-1:0] b,
