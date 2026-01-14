@@ -1,325 +1,165 @@
 `timescale 1ns / 1ps
 
 // =============================================================================
-// Somador Carry-Select em Pipeline de 4 Estágios
-// =============================================================================
-// Arquitetura otimizada para alta frequência usando paralelização e pipelining
-//
-// Pipeline:
-//   Estágio 1: Captura de entrada (Input Register)
-//   Estágio 2: Cálculo dos blocos (Soma com Cin=0 e Cin=1, Generate, Propagate)
-//   Estágio 3: Árvore de prefixo paralela (Cálculo dos carries intermediários)
-//   Estágio 4: Seleção final via multiplexação e registrador de saída
-//
-// Latência: 4 ciclos de clock
-// Throughput: 1 operação por ciclo (após preenchimento do pipeline)
+// MÓDULOS AUXILIARES (RCA, CS_BLOCK, PREFIX_TREE)
+// Permanecem os mesmos para garantir a lógica de soma
 // =============================================================================
 
-
-// =============================================================================
-// MÓDULOS AUXILIARES
-// =============================================================================
-
-// -----------------------------------------------------------------------------
-// Ripple Carry Adder (RCA)
-// -----------------------------------------------------------------------------
-// Somador simples com propagação de carry
-// Usado para calcular somas locais dentro de cada bloco
-// -----------------------------------------------------------------------------
-module rca #(
-    parameter integer WIDTH = 4  // Largura do bloco
-)(
-    input  wire [WIDTH-1:0] a,     // Operando A
-    input  wire [WIDTH-1:0] b,     // Operando B
-    input  wire             cin,   // Carry de entrada
-    output wire [WIDTH-1:0] sum,   // Resultado da soma
-    output wire             cout   // Carry de saída
+module rca #(parameter integer WIDTH = 4) (
+    input  wire [WIDTH-1:0] a, b,
+    input  wire             cin,
+    output wire [WIDTH-1:0] sum,
+    output wire             cout
 );
-    // Soma completa em uma única atribuição
     assign {cout, sum} = a + b + {{(WIDTH-1){1'b0}}, cin};
 endmodule
 
-
-// -----------------------------------------------------------------------------
-// Bloco Carry-Select
-// -----------------------------------------------------------------------------
-// Calcula duas somas em paralelo (assumindo Cin=0 e Cin=1)
-// Gera os sinais Generate (G) e Propagate (P) para a árvore de prefixo
-// -----------------------------------------------------------------------------
-module cs_block #(
-    parameter integer WIDTH = 4  // Largura do bloco
-)(
-    input  wire [WIDTH-1:0] a,      // Operando A
-    input  wire [WIDTH-1:0] b,      // Operando B
-
-    output wire [WIDTH-1:0] sum0,   // Soma assumindo Cin=0
-    output wire [WIDTH-1:0] sum1,   // Soma assumindo Cin=1
-    output wire             c0,     // Carry out quando Cin=0
-    output wire             c1,     // Carry out quando Cin=1
-    output wire             G,      // Generate: este bloco gera carry
-    output wire             P       // Propagate: este bloco propaga carry
+module cs_block #(parameter integer WIDTH = 4) (
+    input  wire [WIDTH-1:0] a, b,
+    output wire [WIDTH-1:0] sum0, sum1,
+    output wire             G, P,
+    output wire             c0, c1
 );
-    // Instanciação dos somadores paralelos
-    rca #(WIDTH) rca_cin0 (
-        .a   (a),
-        .b   (b),
-        .cin (1'b0),
-        .sum (sum0),
-        .cout(c0)
-    );
-
-    rca #(WIDTH) rca_cin1 (
-        .a   (a),
-        .b   (b),
-        .cin (1'b1),
-        .sum (sum1),
-        .cout(c1)
-    );
-
-    // Sinais Generate e Propagate
-    assign G = c0;           // Gera carry quando Cin=0
-    assign P = c1 ^ c0;      // Propaga carry se houver diferença entre c0 e c1
+    rca #(WIDTH) rca0 (.a(a), .b(b), .cin(1'b0), .sum(sum0), .cout(c0));
+    rca #(WIDTH) rca1 (.a(a), .b(b), .cin(1'b1), .sum(sum1), .cout(c1));
+    assign G = c0;
+    assign P = c1 ^ c0;
 endmodule
 
-
-// -----------------------------------------------------------------------------
-// Árvore de Prefixo Paralela (Parallel Prefix Tree)
-// -----------------------------------------------------------------------------
-// Calcula os carries de saída de todos os blocos em tempo logarítmico
-// Implementa o algoritmo de Kogge-Stone para máxima paralelização
-// -----------------------------------------------------------------------------
-module parallel_prefix_tree #(
-    parameter integer N = 8  // Número de blocos
-)(
-    input  wire [N-1:0] G_in,    // Sinais Generate dos blocos
-    input  wire [N-1:0] P_in,    // Sinais Propagate dos blocos
-    input  wire         cin,     // Carry de entrada global
-    output wire [N-1:0] C_out    // Carries de saída de cada bloco
+module parallel_prefix_tree #(parameter integer N = 8) (
+    input  wire [N-1:0] G_in, P_in,
+    input  wire         cin,
+    output wire [N-1:0] C_out
 );
-    // Profundidade da árvore (log2 de N)
     localparam DEPTH = $clog2(N);
+    wire [N-1:0] arvore_g [0:DEPTH];
+    wire [N-1:0] arvore_p [0:DEPTH];
 
-    // Arrays bidimensionais para armazenar G e P em cada nível da árvore
-    wire [N-1:0] arvore_g [DEPTH:0];  // Generate em cada estágio
-    wire [N-1:0] arvore_p [DEPTH:0];  // Propagate em cada estágio
-
-    // Nível 0: Entrada direta dos sinais dos blocos
     assign arvore_g[0] = G_in;
     assign arvore_p[0] = P_in;
 
-    // Construção da árvore de prefixo
-    genvar nivel, bit;
+    genvar nivel, bit_idx, k;
     generate
-        // Para cada nível da árvore
-        for (nivel = 0; nivel < DEPTH; nivel = nivel + 1) begin : NIVEL_ARVORE
-            localparam integer DISTANCIA = 2**nivel;  // Distância de combinação neste nível
-
-            // Para cada bit/bloco
-            for (bit = 0; bit < N; bit = bit + 1) begin : BLOCO_BIT
-                if (bit < DISTANCIA) begin
-                    // Bits iniciais: apenas propaga do nível anterior
-                    assign arvore_g[nivel+1][bit] = arvore_g[nivel][bit];
-                    assign arvore_p[nivel+1][bit] = arvore_p[nivel][bit];
+        for (nivel = 0; nivel < DEPTH; nivel = nivel + 1) begin : NIVEL
+            localparam integer DIST = 2**nivel;
+            for (bit_idx = 0; bit_idx < N; bit_idx = bit_idx + 1) begin : BIT
+                if (bit_idx < DIST) begin
+                    assign arvore_g[nivel+1][bit_idx] = arvore_g[nivel][bit_idx];
+                    assign arvore_p[nivel+1][bit_idx] = arvore_p[nivel][bit_idx];
                 end else begin
-                    // Combinação com vizinho anterior na distância atual
-                    // G_novo = G_atual OU (P_atual E G_anterior)
-                    // P_novo = P_atual E P_anterior
-                    assign arvore_g[nivel+1][bit] = arvore_g[nivel][bit] |
-                                                    (arvore_p[nivel][bit] & arvore_g[nivel][bit-DISTANCIA]);
-                    assign arvore_p[nivel+1][bit] = arvore_p[nivel][bit] & arvore_p[nivel][bit-DISTANCIA];
+                    assign arvore_g[nivel+1][bit_idx] = arvore_g[nivel][bit_idx] | (arvore_p[nivel][bit_idx] & arvore_g[nivel][bit_idx-DIST]);
+                    assign arvore_p[nivel+1][bit_idx] = arvore_p[nivel][bit_idx] & arvore_p[nivel][bit_idx-DIST];
                 end
             end
         end
-    endgenerate
-
-    // Cálculo final dos carries de saída
-    // C_out[k] = G[k] OU (P[k] E Cin)
-    genvar k;
-    generate
-        for (k = 0; k < N; k = k + 1) begin : CARRY_FINAL
+        for (k = 0; k < N; k = k + 1) begin : C_FINAL
             assign C_out[k] = arvore_g[DEPTH][k] | (arvore_p[DEPTH][k] & cin);
         end
     endgenerate
 endmodule
 
-
 // =============================================================================
-// MÓDULO PRINCIPAL: SOMADOR PIPELINE
+// MÓDULO PRINCIPAL: SEM RESET (OTIMIZADO PARA iCE40)
 // =============================================================================
 module pipelined_adder #(
-    parameter integer WIDTH = 32,  // Largura total do somador (bits)
-    parameter integer BLOCK = 8    // Largura de cada bloco carry-select
+    parameter integer WIDTH = 32,
+    parameter integer BLOCK = 8
 )(
-    input  wire             clk,   // Clock do sistema
-    input  wire             rst,   // Reset síncrono ativo em alto
-
-    // Entradas (registradas no Estágio 1)
-    input  wire [WIDTH-1:0] a,     // Operando A
-    input  wire [WIDTH-1:0] b,     // Operando B
-    input  wire             cin,   // Carry de entrada
-
-    // Saídas (disponíveis no Estágio 4)
-    output reg  [WIDTH-1:0] sum,   // Resultado da soma
-    output reg              cout   // Carry de saída
+    input  wire             clk,
+    input  wire             v_in,
+    input  wire [WIDTH-1:0] a,
+    input  wire [WIDTH-1:0] b,
+    input  wire             cin,
+    output reg  [WIDTH-1:0] sum,
+    output reg              v_out,
+    output reg              cout
 );
-    // Número de blocos carry-select
     localparam integer NUM_BLOCOS = WIDTH / BLOCK;
 
+    // Inicialização para Power-On (Suportado por iCE40/Yosys)
+    initial v_out = 0;
 
-    // =========================================================================
-    // ESTÁGIO 1: REGISTRADORES DE ENTRADA
-    // =========================================================================
-    // Captura as entradas e as sincroniza com o pipeline
-    // =========================================================================
-    reg [WIDTH-1:0] estagio1_a;
-    reg [WIDTH-1:0] estagio1_b;
+    // --- ESTÁGIO 1 ---
+    reg [WIDTH-1:0] estagio1_a, estagio1_b;
     reg             estagio1_cin;
+    reg             v_in_2 = 0;
 
     always @(posedge clk) begin
-        if (rst) begin
-            estagio1_a   <= {WIDTH{1'b0}};
-            estagio1_b   <= {WIDTH{1'b0}};
-            estagio1_cin <= 1'b0;
-        end else begin
+        if (v_in) begin
             estagio1_a   <= a;
             estagio1_b   <= b;
             estagio1_cin <= cin;
+        end else begin
+            estagio1_a   <= 0;
+            estagio1_b   <= 0;
+            estagio1_cin <= 0;
+
         end
+        v_in_2 <= v_in;
     end
 
+    // --- ESTÁGIO 2 ---
+    wire [WIDTH-1:0] wire_s0, wire_s1;
+    wire [NUM_BLOCOS-1:0] wire_G, wire_P;
 
-    // =========================================================================
-    // ESTÁGIO 2: CÁLCULO DOS BLOCOS CARRY-SELECT
-    // =========================================================================
-    // Cada bloco calcula duas somas (Cin=0 e Cin=1) e gera sinais G/P
-    // Operação puramente combinacional, seguida de registro
-    // =========================================================================
-
-    // Sinais combinacionais dos blocos
-    wire [WIDTH-1:0]      wire_soma_cin0;    // Todas as somas com Cin=0
-    wire [WIDTH-1:0]      wire_soma_cin1;    // Todas as somas com Cin=1
-    wire [NUM_BLOCOS-1:0] wire_generate;     // Sinais Generate de cada bloco
-    wire [NUM_BLOCOS-1:0] wire_propagate;    // Sinais Propagate de cada bloco
-    wire [NUM_BLOCOS-1:0] wire_carry0;       // Carries com Cin=0 (não usado no pipeline)
-    wire [NUM_BLOCOS-1:0] wire_carry1;       // Carries com Cin=1 (não usado no pipeline)
-
-    // Geração dos blocos carry-select
-    genvar bloco_idx;
+    genvar bi;
     generate
-        for (bloco_idx = 0; bloco_idx < NUM_BLOCOS; bloco_idx = bloco_idx + 1) begin : BLOCOS_CS
-            cs_block #(
-                .WIDTH(BLOCK)
-            ) bloco_cs (
-                .a   (estagio1_a[bloco_idx*BLOCK +: BLOCK]),
-                .b   (estagio1_b[bloco_idx*BLOCK +: BLOCK]),
-                .sum0(wire_soma_cin0[bloco_idx*BLOCK +: BLOCK]),
-                .sum1(wire_soma_cin1[bloco_idx*BLOCK +: BLOCK]),
-                .c0  (wire_carry0[bloco_idx]),
-                .c1  (wire_carry1[bloco_idx]),
-                .G   (wire_generate[bloco_idx]),
-                .P   (wire_propagate[bloco_idx])
+        for (bi = 0; bi < NUM_BLOCOS; bi = bi + 1) begin : BLOCOS
+            cs_block #(BLOCK) cb (
+                .a(estagio1_a[bi*BLOCK +: BLOCK]), .b(estagio1_b[bi*BLOCK +: BLOCK]),
+                .sum0(wire_s0[bi*BLOCK +: BLOCK]), .sum1(wire_s1[bi*BLOCK +: BLOCK]),
+                .G(wire_G[bi]), .P(wire_P[bi]), .c0(), .c1()
             );
         end
     endgenerate
 
-    // Registradores do Estágio 2
-    reg [WIDTH-1:0]      estagio2_soma_cin0;
-    reg [WIDTH-1:0]      estagio2_soma_cin1;
-    reg [NUM_BLOCOS-1:0] estagio2_generate;
-    reg [NUM_BLOCOS-1:0] estagio2_propagate;
-    reg                  estagio2_cin;
+    reg [WIDTH-1:0]      est2_s0, est2_s1;
+    reg [NUM_BLOCOS-1:0] est2_G, est2_P;
+    reg                  est2_cin, v_in_3 = 0;
 
     always @(posedge clk) begin
-        if (rst) begin
-            estagio2_soma_cin0  <= {WIDTH{1'b0}};
-            estagio2_soma_cin1  <= {WIDTH{1'b0}};
-            estagio2_generate   <= {NUM_BLOCOS{1'b0}};
-            estagio2_propagate  <= {NUM_BLOCOS{1'b0}};
-            estagio2_cin        <= 1'b0;
-        end else begin
-            estagio2_soma_cin0  <= wire_soma_cin0;
-            estagio2_soma_cin1  <= wire_soma_cin1;
-            estagio2_generate   <= wire_generate;
-            estagio2_propagate  <= wire_propagate;
-            estagio2_cin        <= estagio1_cin;  // Propaga Cin para próximo estágio
+        if (v_in_2) begin
+            est2_s0  <= wire_s0;
+            est2_s1  <= wire_s1;
+            est2_G   <= wire_G;
+            est2_P   <= wire_P;
+            est2_cin <= estagio1_cin;
         end
+        v_in_3 <= v_in_2;
     end
 
-
-    // =========================================================================
-    // ESTÁGIO 3: ÁRVORE DE PREFIXO (CÁLCULO DOS CARRIES)
-    // =========================================================================
-    // Usa árvore de prefixo paralela para calcular carries em tempo O(log N)
-    // As somas calculadas no estágio anterior são propagadas (pipeline balancing)
-    // =========================================================================
-
-    // Sinais combinacionais da árvore
-    wire [NUM_BLOCOS-1:0] wire_carries_blocos;
-
-    parallel_prefix_tree #(
-        .N(NUM_BLOCOS)
-    ) arvore_carries (
-        .G_in (estagio2_generate),
-        .P_in (estagio2_propagate),
-        .cin  (estagio2_cin),
-        .C_out(wire_carries_blocos)
+    // --- ESTÁGIO 3 ---
+    wire [NUM_BLOCOS-1:0] wire_c_out;
+    parallel_prefix_tree #(NUM_BLOCOS) ppt (
+        .G_in(est2_G), .P_in(est2_P), .cin(est2_cin), .C_out(wire_c_out)
     );
 
-    // Registradores do Estágio 3
-    reg [WIDTH-1:0]      estagio3_soma_cin0;
-    reg [WIDTH-1:0]      estagio3_soma_cin1;
-    reg [NUM_BLOCOS-1:0] estagio3_seletor;      // Máscara de seleção para MUX
-    reg                  estagio3_carry_final;  // Carry de saída global
+    reg [WIDTH-1:0]      est3_s0, est3_s1;
+    reg [NUM_BLOCOS-1:0] est3_sel;
+    reg                  est3_cout_final, v_in_4 = 0;
 
     always @(posedge clk) begin
-        if (rst) begin
-            estagio3_soma_cin0   <= {WIDTH{1'b0}};
-            estagio3_soma_cin1   <= {WIDTH{1'b0}};
-            estagio3_seletor     <= {NUM_BLOCOS{1'b0}};
-            estagio3_carry_final <= 1'b0;
-        end else begin
-            // Pipeline balancing: propaga as somas calculadas anteriormente
-            estagio3_soma_cin0 <= estagio2_soma_cin0;
-            estagio3_soma_cin1 <= estagio2_soma_cin1;
-
-            // Construção do seletor para cada bloco:
-            // - Bloco 0: usa Cin original
-            // - Bloco K (K>0): usa Carry out do bloco K-1
-            estagio3_seletor[0]              <= estagio2_cin;
-            estagio3_seletor[NUM_BLOCOS-1:1] <= wire_carries_blocos[NUM_BLOCOS-2:0];
-
-            // Carry de saída global é o carry do último bloco
-            estagio3_carry_final <= wire_carries_blocos[NUM_BLOCOS-1];
+        if (v_in_3) begin
+            est3_s0         <= est2_s0;
+            est3_s1         <= est2_s1;
+            est3_sel        <= {wire_c_out[NUM_BLOCOS-2:0], est2_cin};
+            est3_cout_final <= wire_c_out[NUM_BLOCOS-1];
         end
+        v_in_4 <= v_in_3;
     end
 
-
-    // =========================================================================
-    // ESTÁGIO 4: SELEÇÃO FINAL E REGISTRADOR DE SAÍDA
-    // =========================================================================
-    // Multiplexação entre soma_cin0 e soma_cin1 baseada nos carries calculados
-    // Resultado final é registrado para saída
-    // =========================================================================
-    integer idx_bloco;
-
+    // --- ESTÁGIO 4 ---
+    integer i;
     always @(posedge clk) begin
-        if (rst) begin
-            sum  <= {WIDTH{1'b0}};
-            cout <= 1'b0;
-        end else begin
-            // Carry de saída
-            cout <= estagio3_carry_final;
-
-            // Multiplexação bloco a bloco
-            // Se seletor[k]=1, usa soma_cin1; caso contrário, usa soma_cin0
-            for (idx_bloco = 0; idx_bloco < NUM_BLOCOS; idx_bloco = idx_bloco + 1) begin
-                if (estagio3_seletor[idx_bloco]) begin
-                    sum[idx_bloco*BLOCK +: BLOCK] <= estagio3_soma_cin1[idx_bloco*BLOCK +: BLOCK];
-                end else begin
-                    sum[idx_bloco*BLOCK +: BLOCK] <= estagio3_soma_cin0[idx_bloco*BLOCK +: BLOCK];
-                end
+        if (v_in_4) begin
+            cout <= est3_cout_final;
+            for (i = 0; i < NUM_BLOCOS; i = i + 1) begin
+                sum[i*BLOCK +: BLOCK] <= est3_sel[i] ?
+                                         est3_s1[i*BLOCK +: BLOCK] :
+                                         est3_s0[i*BLOCK +: BLOCK];
             end
         end
+        v_out <= v_in_4;
     end
 
 endmodule
