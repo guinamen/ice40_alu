@@ -1,8 +1,7 @@
 `timescale 1ns / 1ps
 
 // =============================================================================
-// MÓDULOS AUXILIARES (RCA, CS_BLOCK, PREFIX_TREE)
-// Permanecem os mesmos para garantir a lógica de soma
+// MÓDULOS AUXILIARES
 // =============================================================================
 
 module rca #(parameter integer WIDTH = 4) (
@@ -32,36 +31,32 @@ module parallel_prefix_tree #(parameter integer N = 8) (
     output wire [N-1:0] C_out
 );
     localparam DEPTH = $clog2(N);
-    wire [N-1:0] arvore_g [0:DEPTH];
-    wire [N-1:0] arvore_p [0:DEPTH];
+    wire [N-1:0] g [0:DEPTH];
+    wire [N-1:0] p [0:DEPTH];
 
-    assign arvore_g[0] = G_in;
-    assign arvore_p[0] = P_in;
+    assign g[0] = G_in;
+    assign p[0] = P_in;
 
-    genvar nivel, bit_idx, k;
+    genvar i, j;
     generate
-        for (nivel = 0; nivel < DEPTH; nivel = nivel + 1) begin : NIVEL
-            localparam integer DIST = 2**nivel;
-            for (bit_idx = 0; bit_idx < N; bit_idx = bit_idx + 1) begin : BIT
-                if (bit_idx < DIST) begin
-                    assign arvore_g[nivel+1][bit_idx] = arvore_g[nivel][bit_idx];
-                    assign arvore_p[nivel+1][bit_idx] = arvore_p[nivel][bit_idx];
+        for (i = 0; i < DEPTH; i = i + 1) begin
+            localparam integer D = 1 << i;
+            for (j = 0; j < N; j = j + 1) begin
+                if (j < D) begin
+                    assign g[i+1][j] = g[i][j];
+                    assign p[i+1][j] = p[i][j];
                 end else begin
-                    assign arvore_g[nivel+1][bit_idx] = arvore_g[nivel][bit_idx] | (arvore_p[nivel][bit_idx] & arvore_g[nivel][bit_idx-DIST]);
-                    assign arvore_p[nivel+1][bit_idx] = arvore_p[nivel][bit_idx] & arvore_p[nivel][bit_idx-DIST];
+                    assign g[i+1][j] = g[i][j] | (p[i][j] & g[i][j-D]);
+                    assign p[i+1][j] = p[i][j] & p[i][j-D];
                 end
             end
         end
-        for (k = 0; k < N; k = k + 1) begin : C_FINAL
-            assign C_out[k] = arvore_g[DEPTH][k] | (arvore_p[DEPTH][k] & cin);
-        end
+        for (j = 0; j < N; j = j + 1)
+            assign C_out[j] = g[DEPTH][j] | (p[DEPTH][j] & cin);
     endgenerate
 endmodule
 
-// =============================================================================
-// MÓDULO PRINCIPAL: SEM RESET (OTIMIZADO PARA iCE40)
-// =============================================================================
-module pipelined_adder #(
+module pipelined_adder_core #(
     parameter integer WIDTH = 32,
     parameter integer BLOCK = 8
 )(
@@ -70,107 +65,149 @@ module pipelined_adder #(
     input  wire [WIDTH-1:0] a,
     input  wire [WIDTH-1:0] b,
     input  wire             cin,
+
     output reg  [WIDTH-1:0] sum,
-    output reg              v_out,
-    output reg              cout
+    output reg              v_out
 );
     localparam integer NUM_BLOCOS = WIDTH / BLOCK;
 
-    // Inicialização para Power-On (Suportado por iCE40/Yosys)
-    initial v_out = 0;
-
-    // --- ESTÁGIO 1 ---
-    reg [WIDTH-1:0] estagio1_a, estagio1_b;
-    reg             estagio1_cin;
-    reg             v_in_2 = 0;
-
-    always @(posedge clk) begin
-        if (v_in) begin
-            estagio1_a   <= a;
-            estagio1_b   <= b;
-            estagio1_cin <= cin;
-        end else begin
-            estagio1_a   <= 0;
-            estagio1_b   <= 0;
-            estagio1_cin <= 0;
-
-        end
-        v_in_2 <= v_in;
-    end
-
-    // --- ESTÁGIO 2 ---
-    wire [WIDTH-1:0] wire_s0, wire_s1;
-    wire [NUM_BLOCOS-1:0] wire_G, wire_P;
+    // =========================================================
+    // ESTÁGIO 1 — CS BLOCKS
+    // =========================================================
+    wire [WIDTH-1:0] s0, s1;
+    wire [NUM_BLOCOS-1:0] G, P;
 
     genvar bi;
     generate
-        for (bi = 0; bi < NUM_BLOCOS; bi = bi + 1) begin : BLOCOS
+        for (bi = 0; bi < NUM_BLOCOS; bi = bi + 1) begin
             cs_block #(BLOCK) cb (
-                .a(estagio1_a[bi*BLOCK +: BLOCK]), .b(estagio1_b[bi*BLOCK +: BLOCK]),
-                .sum0(wire_s0[bi*BLOCK +: BLOCK]), .sum1(wire_s1[bi*BLOCK +: BLOCK]),
-                .G(wire_G[bi]), .P(wire_P[bi]), .c0(), .c1()
+                .a   (a[bi*BLOCK +: BLOCK]),
+                .b   (b[bi*BLOCK +: BLOCK]),
+                .sum0(s0[bi*BLOCK +: BLOCK]),
+                .sum1(s1[bi*BLOCK +: BLOCK]),
+                .G   (G[bi]),
+                .P   (P[bi])
             );
         end
     endgenerate
 
-    reg [WIDTH-1:0]      est2_s0, est2_s1;
-    reg [NUM_BLOCOS-1:0] est2_G, est2_P;
-    reg                  est2_cin, v_in_3 = 0;
+    reg [WIDTH-1:0]      est1_s0, est1_s1;
+    reg [NUM_BLOCOS-1:0] est1_G, est1_P;
+    reg                  est1_cin, v1;
 
     always @(posedge clk) begin
-        if (v_in_2) begin
-            est2_s0  <= wire_s0;
-            est2_s1  <= wire_s1;
-            est2_G   <= wire_G;
-            est2_P   <= wire_P;
-            est2_cin <= estagio1_cin;
+        if (v_in) begin
+            est1_s0  <= s0;
+            est1_s1  <= s1;
+            est1_G   <= G;
+            est1_P   <= P;
+            est1_cin <= cin;
         end
-        v_in_3 <= v_in_2;
+        v1 <= v_in;
     end
 
-    // --- ESTÁGIO 3 ---
-    wire [NUM_BLOCOS-1:0] wire_c_out;
+    // =========================================================
+    // ESTÁGIO 2 — PREFIX + SEL REPLICADO
+    // =========================================================
+    wire [NUM_BLOCOS-1:0] C;
+
     parallel_prefix_tree #(NUM_BLOCOS) ppt (
-        .G_in(est2_G), .P_in(est2_P), .cin(est2_cin), .C_out(wire_c_out)
+        .G_in (est1_G),
+        .P_in (est1_P),
+        .cin  (est1_cin),
+        .C_out(C)
     );
 
-    reg [WIDTH-1:0]      est3_s0, est3_s1;
-    reg [NUM_BLOCOS-1:0] est3_sel;
-    reg                  est3_cout_final, v_in_4 = 0;
+    reg [WIDTH-1:0]      est2_s0, est2_s1;
+    reg [NUM_BLOCOS-1:0] sel_a, sel_b;
+    reg                  v2;
 
     always @(posedge clk) begin
-        if (v_in_3) begin
-            est3_s0         <= est2_s0;
-            est3_s1         <= est2_s1;
-            est3_sel        <= {wire_c_out[NUM_BLOCOS-2:0], est2_cin};
-            est3_cout_final <= wire_c_out[NUM_BLOCOS-1];
+        if (v1) begin
+            est2_s0 <= est1_s0;
+            est2_s1 <= est1_s1;
+            sel_a   <= {C[NUM_BLOCOS-2:0], est1_cin};
+            sel_b   <= {C[NUM_BLOCOS-2:0], est1_cin};
         end
-        v_in_4 <= v_in_3;
+        v2 <= v1;
     end
 
-    // --- ESTÁGIO 4 ---
+    // =========================================================
+    // ESTÁGIO 3 — MUX FINAL
+    // =========================================================
     integer i;
     always @(posedge clk) begin
-        if (v_in_4) begin
-            cout <= est3_cout_final;
-            for (i = 0; i < NUM_BLOCOS; i = i + 1) begin
-                sum[i*BLOCK +: BLOCK] <= est3_sel[i] ?
-                                         est3_s1[i*BLOCK +: BLOCK] :
-                                         est3_s0[i*BLOCK +: BLOCK];
-            end
-        end
-        v_out <= v_in_4;
-    end
+        if (v2) begin
+            for (i = 0; i < NUM_BLOCOS/2; i = i + 1)
+                sum[i*BLOCK +: BLOCK] <= sel_a[i] ?
+                                         est2_s1[i*BLOCK +: BLOCK] :
+                                         est2_s0[i*BLOCK +: BLOCK];
 
+            for (i = NUM_BLOCOS/2; i < NUM_BLOCOS; i = i + 1)
+                sum[i*BLOCK +: BLOCK] <= sel_b[i] ?
+                                         est2_s1[i*BLOCK +: BLOCK] :
+                                         est2_s0[i*BLOCK +: BLOCK];
+        end
+        v_out <= v2;
+    end
 endmodule
 
+module pipelined_adder_io #(
+    parameter integer WIDTH = 32,
+    parameter integer BLOCK = 8
+)(
+    input  wire             clk,
+    input  wire             v_in,
+    input  wire [WIDTH-1:0] a,
+    input  wire [WIDTH-1:0] b,
+    input  wire             cin,
 
-// =============================================================================
-// NOTAS DE IMPLEMENTAÇÃO
-// =============================================================================
-// 1. Latência: 4 ciclos de clock do início ao resultado
-// 2. Throughput: 1 operação por ciclo após preenchimento do pipeline
-// 3. Área: O(N) onde N é o número de bits (WIDTH)
-// 4. Tempo crítico: Dominado pela árvore de prefixo no Estágio 3
-// 5. Parâmetros recomendados: BLOCK entre 4 e 16 para melhor balanço área/tempo
-// =============================================================================
+    output wire [WIDTH-1:0] sum,
+    output wire             v_out
+);
+    // -----------------------------
+    // INPUT IOB
+    // -----------------------------
+    (* IOB = "true" *) reg [WIDTH-1:0] a_iob, b_iob;
+    (* IOB = "true" *) reg             cin_iob, v_iob;
+
+    always @(posedge clk) begin
+        a_iob <= a;
+        b_iob <= b;
+        cin_iob <= cin;
+        v_iob <= v_in;
+    end
+
+    // -----------------------------
+    // CORE
+    // -----------------------------
+    wire [WIDTH-1:0] sum_core;
+    wire             v_core;
+
+    pipelined_adder_core #(
+        .WIDTH(WIDTH),
+        .BLOCK(BLOCK)
+    ) core (
+        .clk   (clk),
+        .v_in  (v_iob),
+        .a     (a_iob),
+        .b     (b_iob),
+        .cin   (cin_iob),
+        .sum   (sum_core),
+        .v_out (v_core)
+    );
+
+    // -----------------------------
+    // OUTPUT IOB
+    // -----------------------------
+    (* IOB = "true" *) reg [WIDTH-1:0] sum_iob;
+    (* IOB = "true" *) reg             v_out_iob;
+
+    always @(posedge clk) begin
+        sum_iob   <= sum_core;
+        v_out_iob <= v_core;
+    end
+
+    assign sum   = sum_iob;
+    assign v_out = v_out_iob;
+endmodule
