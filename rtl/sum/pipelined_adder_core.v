@@ -51,13 +51,13 @@ module pipelined_adder_core #(
     // =========================================================
     // ESTÁGIO 2 — PREFIX + SEL REPLICADO
     // =========================================================
-    wire [NUM_BLOCOS-1:0] C;
+    wire [NUM_BLOCOS-2:0] C;
 
     parallel_prefix_tree #(NUM_BLOCOS) ppt (
         .G_in (est1_G),
         .P_in (est1_P),
         .cin  (est1_cin),
-        .C_out(C)
+        .C_chain(C)
     );
 
     reg [WIDTH-1:0]      est2_s0, est2_s1;
