@@ -1,4 +1,4 @@
-module incrementer_mux_lut #(
+module plus_one #(
     parameter WIDTH = 32,
     parameter BLOCK_SIZE = 8
 )(
@@ -40,8 +40,6 @@ module incrementer_mux_lut #(
             genvar j;
             for (j = 0; j < NUM_BLOCKS; j = j + 1) begin : gather_bits
                 localparam START = j * BLOCK_SIZE;
-                localparam END = (START + BLOCK_SIZE > WIDTH) ? WIDTH : START + BLOCK_SIZE;
-                
                 if (START + i < WIDTH)
                     assign bit_sources[j] = data_in[START + i] & target_sel[j];
                 else
