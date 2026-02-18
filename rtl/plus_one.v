@@ -1,6 +1,6 @@
 module plus_one #(
     parameter WIDTH      = 32,
-    parameter BLOCK_SIZE = 2
+    parameter BLOCK_SIZE = 16
 )(
     input  wire [WIDTH-1:0] data_in,
     output wire [WIDTH-1:0] data_out
